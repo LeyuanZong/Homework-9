@@ -1,0 +1,194 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Average Vehicle Price — Australia</title>
+  <script src="https://cdn.jsdelivr.net/npm/vega@5"></script>
+  <script src="https://cdn.jsdelivr.net/npm/vega-lite@5"></script>
+  <script src="https://cdn.jsdelivr.net/npm/vega-embed@6"></script>
+  <style>
+    body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto}
+    .wrap{padding:16px;max-width:1100px;margin:0 auto}
+    #vis{border:1px solid #e5e7eb;border-radius:12px;min-height:560px}
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Average Vehicle Price — Australia</h1>
+  <p>Data: <code>Australian_Vehicle_Prices.csv</code> + <code>states.min.geojson</code></p>
+  <div id="vis"><em>Loading…</em></div>
+</div>
+
+<script>
+(async function () {
+  const mount = document.getElementById('vis');
+
+  // 读取州界 GeoJSON（FeatureCollection）
+  let fc;
+  try {
+    const res = await fetch('states.min.geojson', {cache:'no-store'});
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    fc = await res.json();
+    if (!fc || fc.type !== 'FeatureCollection' || !Array.isArray(fc.features)) {
+      throw new Error('states.min.geojson is not a valid FeatureCollection');
+    }
+  } catch (e) {
+    mount.textContent = 'Failed to load states.min.geojson: ' + e;
+    return;
+  }
+  const STATES = fc.features;
+
+  // 主要城市坐标
+  const CAPITALS = [
+    {City:"Sydney",   StateAbbr:"NSW", lon:151.2093, lat:-33.8688},
+    {City:"Melbourne",StateAbbr:"VIC", lon:144.9631, lat:-37.8136},
+    {City:"Brisbane", StateAbbr:"QLD", lon:153.0251, lat:-27.4698},
+    {City:"Perth",    StateAbbr:"WA",  lon:115.8605, lat:-31.9505},
+    {City:"Adelaide", StateAbbr:"SA",  lon:138.6007, lat:-34.9285},
+    {City:"Hobart",   StateAbbr:"TAS", lon:147.3272, lat:-42.8821},
+    {City:"Darwin",   StateAbbr:"NT",  lon:130.8456, lat:-12.4634},
+    {City:"Canberra", StateAbbr:"ACT", lon:149.1300, lat:-35.2809}
+  ];
+
+  // —— 关键：使用“手动投影”而不是 fit —— //
+  // 这组参数已调好能“完整显示澳大利亚”，若显示偏移/裁切，可微调。
+  const projectionConf = {
+    type: "mercator",
+    center: [134.5, -27],   // 经度在前，纬度在后（南半球为负）
+    scale: 610               // 放大倍率：大=放大；若右侧或下侧被裁切→调小一些
+  };
+
+  const spec = {
+    $schema: "https://vega.github.io/schema/vega-lite/v5.json",
+    width: 1000,
+    height: 650,
+    projection: projectionConf,
+
+    layer: [
+      // 1) 经纬网
+      {
+        data: { graticule: { step: [10, 10] } },
+        mark: { type: "geoshape", stroke: "#c7d3df", strokeWidth: 0.6 }
+      },
+      // 2) 州界底图
+      {
+        data: { values: STATES },
+        mark: { type: "geoshape", stroke: "#8a99a8", strokeWidth: 1, fill: "#eef4fb" },
+        encoding: {
+          shape: { field: "geometry", type: "geojson" },
+          tooltip: [{ field: "properties.STATE_NAME", title: "State/Territory" }]
+        }
+      },
+      // 3) 州级等值面（均价）
+      {
+        data: { url: "Australian_Vehicle_Prices.csv", format: { type: "csv" } },
+        transform: [
+          // 从 Location 提取州缩写（兼容 “City, NSW” 或仅 “NSW”）
+          {
+            calculate:
+              "datum.Location ? " +
+              "(indexof(datum.Location, ',')>=0 ? " +
+                "upper(trim(split(datum.Location, ',')[length(split(datum.Location, ','))-1])) : " +
+                "upper(trim(datum.Location))" +
+              ") : ''",
+            as: "StateAbbr"
+          },
+          // 缩写 -> 州全名（与 GeoJSON 的 properties.STATE_NAME 匹配）
+          {
+            lookup: "StateAbbr",
+            from: {
+              data: { values: [
+                {"abbr":"NSW","STATE_NAME":"New South Wales"},
+                {"abbr":"VIC","STATE_NAME":"Victoria"},
+                {"abbr":"QLD","STATE_NAME":"Queensland"},
+                {"abbr":"WA","STATE_NAME":"Western Australia"},
+                {"abbr":"SA","STATE_NAME":"South Australia"},
+                {"abbr":"TAS","STATE_NAME":"Tasmania"},
+                {"abbr":"NT","STATE_NAME":"Northern Territory"},
+                {"abbr":"ACT","STATE_NAME":"Australian Capital Territory"}
+              ]},
+              key: "abbr",
+              fields: ["STATE_NAME"]
+            }
+          },
+          { filter: "isValid(datum.STATE_NAME)" },
+          { aggregate: [{ op:"mean", field:"Price", as:"AvgPrice" }], groupby:["STATE_NAME"] },
+          // 绑定几何
+          {
+            lookup: "STATE_NAME",
+            from: { data: { values: STATES }, key: "properties.STATE_NAME" },
+            as: "geom"
+          },
+          { filter: "isValid(datum.geom)" }
+        ],
+        mark: { type: "geoshape", stroke: "white", strokeWidth: 0.8, fillOpacity: 0.95 },
+        encoding: {
+          shape: { field: "geom", type: "geojson" },
+          color: { field: "AvgPrice", type: "quantitative", scale: { scheme: "blues" }, title: "Avg Price (AUD)" },
+          tooltip: [
+            { field: "STATE_NAME", title: "State/Territory" },
+            { field: "AvgPrice", title: "Avg Price (AUD)", format: ",.0f" }
+          ]
+        }
+      },
+      // 4) 主要城市气泡（均价：大小+颜色）
+      {
+        data: { url: "Australian_Vehicle_Prices.csv", format: { type: "csv" } },
+        transform: [
+          // 城市名：Location 逗号前；无逗号则自身
+          {
+            calculate:
+              "datum.Location && indexof(datum.Location, ',')>=0 ? " +
+              "trim(split(datum.Location, ',')[0]) : trim(datum.Location || '')",
+            as: "CityRaw"
+          },
+          // 仅保留八大城市
+          {
+            calculate:
+              "upper(datum.CityRaw) == 'SYDNEY' ? 'Sydney' :" +
+              "upper(datum.CityRaw) == 'MELBOURNE' ? 'Melbourne' :" +
+              "upper(datum.CityRaw) == 'BRISBANE' ? 'Brisbane' :" +
+              "upper(datum.CityRaw) == 'PERTH' ? 'Perth' :" +
+              "upper(datum.CityRaw) == 'ADELAIDE' ? 'Adelaide' :" +
+              "upper(datum.CityRaw) == 'HOBART' ? 'Hobart' :" +
+              "upper(datum.CityRaw) == 'DARWIN' ? 'Darwin' :" +
+              "upper(datum.CityRaw) == 'CANBERRA' ? 'Canberra' : null",
+            as: "City"
+          },
+          { filter: "isValid(datum.City)" },
+          { aggregate: [{ op:"mean", field:"Price", as:"CityAvgPrice" }], groupby:["City"] },
+          { lookup: "City", from: { data: { values: CAPITALS }, key: "City", fields: ["lon","lat","StateAbbr"] } }
+        ],
+        mark: { type: "circle", stroke: "white", strokeWidth: 1 },
+        encoding: {
+          longitude: { field: "lon" }, latitude: { field: "lat" },
+          size: { field: "CityAvgPrice", type: "quantitative", scale: { range: [60, 900] }, title: "City Avg (AUD)" },
+          color:{ field: "CityAvgPrice", type: "quantitative", scale: { scheme: "oranges" }, legend: null },
+          tooltip: [
+            { field: "City", title: "City" },
+            { field: "StateAbbr", title: "State" },
+            { field: "CityAvgPrice", title: "Avg Price (AUD)", format: ",.0f" }
+          ]
+        }
+      },
+      // 5) 城市标签
+      {
+        data: { values: CAPITALS },
+        mark: { type: "text", dy: -10, fontSize: 11, fill: "#0f172a", fontWeight: "600" },
+        encoding: {
+          longitude: { field: "lon" }, latitude: { field: "lat" },
+          text: { field: "City" }
+        }
+      }
+    ],
+
+    title: { text: "Average Vehicle Price by State & Major Cities (Australia)", anchor: "start" },
+    config: { view: { stroke: null }, background: "white" }
+  };
+
+  vegaEmbed('#vis', spec, {actions:{export:true, source:true, editor:true}})
+    .catch(e => { mount.textContent = 'Vega-Lite render error: ' + e; console.error(e); });
+})();
+</script>
+</body>
+</html>
